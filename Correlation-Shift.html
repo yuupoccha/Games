@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Correlation Shift</title>
+  
+  <style>
+    body {
+      background-color: #0a0a0c;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      margin: 0;
+      font-family: 'Helvetica Neue', Arial, sans-serif;
+    }
+
+    #game-container {
+      background-color: #1e1e24;
+      color: #fff;
+      padding: 15px;
+      border-radius: 12px;
+      max-width: 500px;
+      width: 95%;
+      box-shadow: 0 8px 30px rgba(0,0,0,0.8);
+      user-select: none;
+      box-sizing: border-box;
+    }
+
+    .hidden { display: none !important; }
+
+    #start-menu { text-align: center; padding: 20px 10px 30px; }
+    
+    /* タイトルロゴ風 */
+    .game-title {
+      color: #fff;
+      font-size: 32px;
+      font-weight: 900;
+      letter-spacing: 4px;
+      margin-bottom: 5px;
+      text-shadow: 0 0 10px #00d5ff, 0 0 20px #0077ff;
+    }
+
+    .diff-btn {
+      display: block; width: 100%; padding: 12px; margin-bottom: 12px;
+      background: #2a2a35; color: #fff; border: 1px solid #555;
+      border-radius: 8px; font-size: 16px; cursor: pointer; transition: all 0.2s;
+    }
+    .diff-btn:hover { background: #3a3a45; border-color: #00d5ff; }
+    .diff-btn:active { transform: scale(0.97); }
+
+    #canvas-wrapper {
+      position: relative; width: 100%; aspect-ratio: 1 / 1;
+      border-radius: 8px; overflow: hidden;
+      box-shadow: inset 0 0 20px rgba(0,0,0,0.8); background-color: #111115;
+    }
+    #game-canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+    #game-canvas:active { cursor: grabbing; }
+
+    #controls-panel { margin-top: 15px; }
+
+    #action-btn {
+      display: block; width: 100%; padding: 15px;
+      background: linear-gradient(135deg, #00d5ff, #0077ff);
+      color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: bold;
+      cursor: pointer; box-shadow: 0 4px 15px rgba(0, 119, 255, 0.4);
+    }
+    #action-btn:active { transform: scale(0.98); filter: brightness(1.2); }
+
+    #btn-next {
+      display: block; width: 100%; padding: 15px;
+      background: linear-gradient(135deg, #00ff88, #00aa55);
+      color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: bold;
+      cursor: pointer; box-shadow: 0 4px 15px rgba(0, 255, 136, 0.4);
+    }
+    #btn-next:active { transform: scale(0.98); filter: brightness(1.2); }
+
+    .hint { text-align: center; font-size: 11px; color: #888; margin-top: 10px; line-height: 1.5; }
+  </style>
+</head>
+<body>
+
+<div id="game-container">
+  <div id="start-menu">
+    <h1 class="game-title">Correlation Shift</h1>
+    <h2 style="color: #00d5ff; letter-spacing: 2px; font-size: 16px; margin-top: 0;">SELECT DIFFICULTY</h2>
+    <p style="font-size: 13px; color: #ccc; margin-bottom: 20px;">
+      目標の相関係数に合わせて<br>点群を回転させてください。
+    </p>
+    <button class="diff-btn" data-diff="EASY" data-err="0.600">
+      <strong>EASY</strong><br><span style="font-size:11px">許容誤差: 0.600</span>
+    </button>
+    <button class="diff-btn" data-diff="NORMAL" data-err="0.300">
+      <strong>NORMAL</strong><br><span style="font-size:11px">許容誤差: 0.300</span>
+    </button>
+    <button class="diff-btn" data-diff="HARD" data-err="0.100" style="margin-bottom:0;">
+      <strong>HARD</strong><br><span style="font-size:11px">許容誤差: 0.100</span>
+    </button>
+  </div>
+
+  <div id="game-area" class="hidden">
+    <div id="canvas-wrapper">
+      <canvas id="game-canvas" width="500" height="500"></canvas>
+    </div>
+    
+    <div id="controls-panel">
+      <button id="action-btn">射影</button>
+      <button id="btn-next" class="hidden">次へ</button>
+      <p class="hint">キャンバス上をドラッグ/スワイプで回転</p>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+    const canvas = document.getElementById('game-canvas');
+    const ctx = canvas.getContext('2d');
+    
+    const startMenu = document.getElementById('start-menu');
+    const gameArea = document.getElementById('game-area');
+    const actionBtn = document.getElementById('action-btn');
+    const btnNext = document.getElementById('btn-next');
+    
+    let points = [];
+    let currentRound = 1;
+    let targetR = 0;
+    let totalError = 0;
+    let currentResultR = 0;
+    let currentError = 0;
+    let roundHistory = [];
+    
+    let difficulty = 'NORMAL';
+    let maxError = 0.300;
+    let gameState = 'menu';
+    
+    // プレイヤーの操作による回転角
+    let theta = 0;
+    let phi = 0;
+    // カメラの固定ひねり角
+    const psi = Math.PI / 4;
+    
+    let isDragging = false;
+    let lastDragX = 0;
+    let lastDragY = 0;
+    
+    document.querySelectorAll('.diff-btn').forEach(btn => {
+        btn.addEventListener('click', function() {
+            difficulty = this.getAttribute('data-diff');
+            maxError = parseFloat(this.getAttribute('data-err'));
+            startGame();
+        });
+    });
+    
+    function startGame() {
+        startMenu.classList.add('hidden');
+        gameArea.classList.remove('hidden');
+        currentRound = 1;
+        totalError = 0;
+        roundHistory = [];
+        initRound();
+    }
+    
+    function initRound() {
+        let baseR = (Math.random() + Math.random() + Math.random()) / 3;
+        targetR = Math.round(baseR * 1000) / 1000;
+        
+        points = generatePerfectCorrelationPoints(targetR);
+        
+        // プレイヤーの初期視点をランダムにリセット
+        theta = (Math.random() - 0.5) * Math.PI * 2;
+        phi = (Math.random() - 0.5) * Math.PI * 2;
+        
+        actionBtn.classList.remove('hidden');
+        btnNext.classList.add('hidden');
+        btnNext.innerText = "次へ";
+        
+        gameState = 'playing';
+    }
+    
+    function generatePerfectCorrelationPoints(r, numPoints = 15) {
+        let u = [], v = [], w = [];
+        for(let i=0; i<numPoints; i++) {
+            u.push(Math.random()*2-1);
+            v.push(Math.random()*2-1);
+            w.push(Math.random()*2-1);
+        }
+        
+        // グラム・シュミットの直交化と正規化（完全な相関を作るための下準備）
+        let meanU = u.reduce((a,b)=>a+b)/numPoints;
+        u = u.map(x => x - meanU);
+        let normU = Math.sqrt(u.reduce((a,b)=>a+b*b,0));
+        u = u.map(x => x / (normU || 1));
+        
+        let meanV = v.reduce((a,b)=>a+b)/numPoints;
+        v = v.map(x => x - meanV);
+        let dotUV = u.reduce((sum, val, i) => sum + val * v[i], 0);
+        v = v.map((val, i) => val - dotUV * u[i]);
+        let normV = Math.sqrt(v.reduce((a,b)=>a+b*b,0));
+        v = v.map(x => x / (normV || 1));
+        
+        let meanW = w.reduce((a,b)=>a+b)/numPoints;
+        w = w.map(x => x - meanW);
+        let normW = Math.sqrt(w.reduce((a,b)=>a+b*b,0));
+        w = w.map(x => x / (normW || 1));
+        
+        let finalV = [];
+        let coeff = Math.sqrt(1 - r*r);
+        for(let i=0; i<numPoints; i++) {
+            finalV.push(r * u[i] + coeff * v[i]);
+        }
+        
+        let scale = 200; 
+        let pts = [];
+        
+        // 【逆算ロジック】正解となる「ターゲットのθとφ」をランダムに決定
+        let targetTheta = Math.random() * Math.PI * 2;
+        let targetPhi = Math.random() * Math.PI * 2;
+        
+        for(let i=0; i<numPoints; i++) {
+            // 2D平面(X, Y)上で完璧に相関が一致する座標をZ=ランダムで配置
+            let x3 = u[i] * scale;
+            let y3 = finalV[i] * scale;
+            let z3 = w[i] * scale;
+            
+            // プレイヤーの操作の逆回転を施す
+            // 1. θの逆回転
+            let x2 = x3 * Math.cos(targetTheta) - z3 * Math.sin(targetTheta);
+            let y2 = y3;
+            let z2 = x3 * Math.sin(targetTheta) + z3 * Math.cos(targetTheta);
+            
+            // 2. φの逆回転
+            let x1 = x2;
+            let y1 = y2 * Math.cos(targetPhi) + z2 * Math.sin(targetPhi);
+            let z1 = -y2 * Math.sin(targetPhi) + z2 * Math.cos(targetPhi);
+            
+            // 3. ψ（カメラの固定ひねり角）の逆回転
+            let p_x = x1 * Math.cos(psi) + y1 * Math.sin(psi);
+            let p_y = -x1 * Math.sin(psi) + y1 * Math.cos(psi);
+            let p_z = z1;
+            
+            pts.push({ x: p_x, y: p_y, z: p_z });
+        }
+        return pts;
+    }
+    
+    function getProjectedPoints() {
+        let projected = [];
+        for(let p of points) {
+            // 1. ψ（固定ひねり）
+            let x1 = p.x * Math.cos(psi) - p.y * Math.sin(psi);
+            let y1 = p.x * Math.sin(psi) + p.y * Math.cos(psi);
+            let z1 = p.z;
+            
+            // 2. φ（上下回転）
+            let y2 = y1 * Math.cos(phi) - z1 * Math.sin(phi);
+            let z2 = y1 * Math.sin(phi) + z1 * Math.cos(phi);
+            let x2 = x1;
+            
+            // 3. θ（左右回転）
+            let x3 = x2 * Math.cos(theta) + z2 * Math.sin(theta);
+            let z3 = -x2 * Math.sin(theta) + z2 * Math.cos(theta);
+            let y3 = y2;
+            
+            projected.push({x: x3, y: y3, z: z3});
+        }
+        return projected;
+    }
+    
+    function calculateCorrelation(pts) {
+        let xs = pts.map(p => p.x);
+        let ys = pts.map(p => p.y);
+        let meanX = xs.reduce((a,b)=>a+b, 0) / xs.length;
+        let meanY = ys.reduce((a,b)=>a+b, 0) / ys.length;
+        let num = 0, denX = 0, denY = 0;
+        for(let i = 0; i < xs.length; i++) {
+            let dx = xs[i] - meanX;
+            let dy = ys[i] - meanY;
+            num += dx * dy; denX += dx * dx; denY += dy * dy;
+        }
+        if(denX === 0 || denY === 0) return 0;
+        return num / Math.sqrt(denX * denY);
+    }
+    
+    function handleDragStart(x, y) {
+        if(gameState !== 'playing') return;
+        isDragging = true;
+        lastDragX = x; lastDragY = y;
+    }
+    function handleDragMove(x, y) {
+        if(!isDragging || gameState !== 'playing') return;
+        let dx = x - lastDragX;
+        let dy = y - lastDragY;
+        theta += dx * 0.008; 
+        phi   -= dy * 0.008; 
+        lastDragX = x; lastDragY = y;
+    }
+    function handleDragEnd() { isDragging = false; }
+    
+    canvas.addEventListener('mousedown', e => handleDragStart(e.clientX, e.clientY));
+    window.addEventListener('mousemove', e => handleDragMove(e.clientX, e.clientY));
+    window.addEventListener('mouseup', handleDragEnd);
+    canvas.addEventListener('touchstart', e => {
+        if(e.touches.length === 1) handleDragStart(e.touches[0].clientX, e.touches[0].clientY);
+    }, {passive:true});
+    window.addEventListener('touchmove', e => {
+        if(e.touches.length === 1) handleDragMove(e.touches[0].clientX, e.touches[0].clientY);
+    }, {passive:true});
+    window.addEventListener('touchend', handleDragEnd);
+    
+    actionBtn.addEventListener('click', function() {
+        if(gameState === 'playing') {
+            let proj = getProjectedPoints();
+            currentResultR = calculateCorrelation(proj);
+            currentError = Math.abs(currentResultR - targetR);
+            totalError += currentError;
+            
+            roundHistory.push({
+                round: currentRound,
+                target: targetR,
+                result: currentResultR,
+                error: currentError
+            });
+            
+            actionBtn.classList.add('hidden');
+            btnNext.classList.remove('hidden');
+            gameState = 'result';
+        }
+    });
+    
+    btnNext.addEventListener('click', function() {
+        if(gameState === 'result') {
+            if(currentRound < 3) {
+                currentRound++;
+                initRound();
+            } else {
+                gameState = 'gameover';
+                btnNext.innerText = "もう一度やる";
+                btnNext.style.background = "linear-gradient(135deg, #888, #555)";
+                btnNext.style.boxShadow = "none";
+            }
+        } else if(gameState === 'gameover') {
+            gameArea.classList.add('hidden');
+            startMenu.classList.remove('hidden');
+            btnNext.style.background = "linear-gradient(135deg, #00ff88, #00aa55)";
+            gameState = 'menu';
+        }
+    });
+    
+    function draw() {
+        requestAnimationFrame(draw);
+        if(gameState === 'menu') return;
+        
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        let cx = canvas.width / 2;
+        let cy = canvas.height / 2;
+        let proj = getProjectedPoints();
+        
+        if (gameState === 'playing') {
+            ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+            ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.moveTo(cx, 0); ctx.lineTo(cx, canvas.height); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(0, cy); ctx.lineTo(canvas.width, cy); ctx.stroke();
+            
+            let axesRaw = [
+                {id: 'X', pt: {x: 120, y: 0, z: 0}, color: '#ff4444'},
+                {id: 'Y', pt: {x: 0, y: 120, z: 0}, color: '#44ff44'},
+                {id: 'Z', pt: {x: 0, y: 0, z: 120}, color: '#4444ff'}
+            ];
+            axesRaw.forEach(a => {
+                let x1 = a.pt.x * Math.cos(psi) - a.pt.y * Math.sin(psi);
+                let y1 = a.pt.x * Math.sin(psi) + a.pt.y * Math.cos(psi);
+                let z1 = a.pt.z;
+                let y2 = y1 * Math.cos(phi) - z1 * Math.sin(phi);
+                let z2 = y1 * Math.sin(phi) + z1 * Math.cos(phi);
+                let x2 = x1;
+                let x3 = x2 * Math.cos(theta) + z2 * Math.sin(theta);
+                let z3 = -x2 * Math.sin(theta) + z2 * Math.cos(theta);
+                let y3 = y2;
+                
+                ctx.beginPath();
+                ctx.strokeStyle = a.color;
+                ctx.lineWidth = 2;
+                ctx.moveTo(cx, cy);
+                ctx.lineTo(cx + x3, cy - y3); 
+                ctx.stroke();
+                
+                ctx.fillStyle = a.color;
+                ctx.font = 'bold 12px sans-serif';
+                ctx.fillText(a.id, cx + x3 * 1.15, cy - y3 * 1.15);
+            });
+            
+        } else if (gameState === 'result') {
+            ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+            ctx.lineWidth = 1;
+            for(let i = 0; i <= canvas.width; i += 40) {
+                ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, canvas.height); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(canvas.width, i); ctx.stroke();
+            }
+            ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+            ctx.lineWidth = 2;
+            ctx.beginPath(); ctx.moveTo(cx, 0); ctx.lineTo(cx, canvas.height); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(0, cy); ctx.lineTo(canvas.width, cy); ctx.stroke();
+            
+            let xs = proj.map(p => p.x);
+            let ys = proj.map(p => p.y);
+            let meanX = xs.reduce((a,b)=>a+b)/xs.length;
+            let meanY = ys.reduce((a,b)=>a+b)/ys.length;
+            let num = 0, den = 0;
+            for(let i=0; i<xs.length; i++) {
+                num += (xs[i]-meanX)*(ys[i]-meanY);
+                den += (xs[i]-meanX)*(xs[i]-meanX);
+            }
+            let m = den === 0 ? 0 : num/den;
+            let b = meanY - m*meanX;
+            
+            ctx.strokeStyle = '#ffcc00';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([5, 5]);
+            ctx.beginPath();
+            ctx.moveTo(0, cy - (m * (-cx) + b));
+            ctx.lineTo(canvas.width, cy - (m * (cx) + b));
+            ctx.stroke();
+            ctx.setLineDash([]); 
+        }
+        
+        if (gameState === 'playing') {
+            proj.sort((a, b) => a.z - b.z); 
+            proj.forEach(p => {
+                let zNorm = (p.z + 250) / 500; 
+                if(zNorm < 0.1) zNorm = 0.1;
+                if(zNorm > 1.0) zNorm = 1.0;
+                
+                let radius = 3.5 + zNorm * 5;      
+                let alpha = 0.3 + zNorm * 0.7;    
+                
+                ctx.beginPath();
+                ctx.arc(cx + p.x, cy - p.y, radius, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(0, 213, 255, ${alpha})`;
+                if(zNorm > 0.6) {
+                    ctx.shadowBlur = radius * 1.5;
+                    ctx.shadowColor = '#00d5ff';
+                }
+                ctx.fill();
+                ctx.shadowBlur = 0; 
+            });
+        } else if (gameState === 'result') {
+            proj.forEach(p => {
+                ctx.beginPath();
+                ctx.arc(cx + p.x, cy - p.y, 4.5, 0, Math.PI * 2);
+                ctx.fillStyle = '#00d5ff';
+                ctx.fill();
+                ctx.strokeStyle = '#ffffff';
+                ctx.lineWidth = 1.5;
+                ctx.stroke();
+            });
+        }
+        
+        if (gameState !== 'gameover') {
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 18px "Helvetica Neue", Arial, sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText(`ROUND ${currentRound} / 3`, 15, 30);
+            
+            ctx.textAlign = 'right';
+            ctx.fillText(`TOTAL ERROR: ${totalError.toFixed(3)} / ${maxError.toFixed(3)}`, canvas.width - 15, 30);
+        }
+        
+        if (gameState === 'playing') {
+            ctx.fillStyle = '#ffcc00';
+            ctx.font = 'bold 36px "Helvetica Neue", Arial, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(`TARGET: ${targetR.toFixed(3)}`, cx, 80);
+        } else if (gameState === 'result') {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+            ctx.fillRect(cx - 190, 45, 380, 80);
+            
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 22px "Helvetica Neue", Arial, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(`TARGET: ${targetR.toFixed(3)}    RESULT: ${currentResultR.toFixed(3)}`, cx, 75);
+            
+            ctx.fillStyle = '#ff6666';
+            ctx.font = 'bold 24px "Helvetica Neue", Arial, sans-serif';
+            ctx.fillText(`ERROR: ${currentError.toFixed(3)}`, cx, 110);
+        } else if (gameState === 'gameover') {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.9)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            ctx.textAlign = 'center';
+            if (totalError <= maxError) {
+                ctx.fillStyle = '#00ffcc';
+                ctx.font = 'bold 38px "Helvetica Neue", Arial, sans-serif';
+                ctx.fillText("🏆 CLEAR !! 🏆", cx, cy - 140);
+            } else {
+                ctx.fillStyle = '#ff4444';
+                ctx.font = 'bold 38px "Helvetica Neue", Arial, sans-serif';
+                ctx.fillText("❌ GAME OVER... ❌", cx, cy - 140);
+            }
+            
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 18px "Helvetica Neue", Arial, sans-serif';
+            ctx.fillText(`最終累計誤差: ${totalError.toFixed(3)} / 許容: ${maxError.toFixed(3)}`, cx, cy - 90);
+            
+            ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+            ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.moveTo(cx - 180, cy - 70); ctx.lineTo(cx + 180, cy - 70); ctx.stroke();
+            
+            ctx.fillStyle = '#888888';
+            ctx.font = 'bold 13px "Helvetica Neue", Arial, sans-serif';
+            ctx.textAlign = 'left';   ctx.fillText("ROUND", cx - 170, cy - 45);
+            ctx.textAlign = 'center'; ctx.fillText("TARGET", cx - 55, cy - 45);
+                                      ctx.fillText("RESULT", cx + 35, cy - 45);
+                                      ctx.fillText("ERROR", cx + 125, cy - 45);
+            
+            ctx.font = 'bold 15px "Courier New", Courier, monospace';
+            roundHistory.forEach((h, idx) => {
+                let yOffset = cy - 5 + idx * 35;
+                
+                ctx.fillStyle = '#ffffff';
+                ctx.textAlign = 'left';
+                ctx.fillText(` Rd ${h.round}`, cx - 170, yOffset);
+                
+                ctx.textAlign = 'center';
+                ctx.fillStyle = '#ffcc00'; ctx.fillText(h.target.toFixed(3), cx - 55, yOffset);
+                ctx.fillStyle = '#00d5ff'; ctx.fillText(h.result.toFixed(3), cx + 35, yOffset);
+                ctx.fillStyle = '#ff6666'; ctx.fillText(h.error.toFixed(3), cx + 125, yOffset);
+            });
+        }
+    }
+    
+    draw();
+})();
+</script>
+
+</body>
+</html>
